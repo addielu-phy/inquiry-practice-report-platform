@@ -1,0 +1,8 @@
+# Local runtime data
+local-server/data/
+local-server/exports/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+firebase-debug.log
