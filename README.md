@@ -2,6 +2,11 @@
 
 穩定網站版：抽籤排序、QR 即時評分、報告／提問／換場計時、平均分數與 Excel 匯出。
 
+## 正式網址
+
+- 公開網站：<https://addielu-phy.github.io/inquiry-practice-report-platform/>
+- 原始碼：<https://github.com/addielu-phy/inquiry-practice-report-platform>
+
 ## 公開網站版特色
 
 - 老師端在 GitHub Pages 上直接開啟，不需要安裝。
