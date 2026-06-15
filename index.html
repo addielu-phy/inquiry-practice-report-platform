@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>探究與實作期末報告平台</title>
-  <meta name="description" content="探究與實作期末報告：抽籤排序、QR 即時評分、計時、平均分數與 Excel 匯出平台。" />
+  <meta name="description" content="探究與實作期末報告：抽籤排序、QR 即時評分、三向度報告評量、計時、平均分數與 Excel 匯出平台。" />
   <link rel="stylesheet" href="src/styles.css" />
   <script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
@@ -17,7 +17,7 @@
       <div>
         <p class="eyebrow">Inquiry & Practice Live Assessment</p>
         <h1>探究與實作期末報告平台</h1>
-        <p class="lead">抽籤排序、QR 即時評分、報告／提問／換場計時、平均分數與 Excel 匯出。</p>
+        <p class="lead">抽籤排序、QR 即時評分、座號紀錄、三向度報告評量、報告／提問／換場計時與 Excel 匯出。</p>
       </div>
       <div class="hero-badge">
         <span>GitHub Pages 穩定版</span>
@@ -27,15 +27,24 @@
 
     <main id="teacherApp" class="mode-panel hidden">
       <section class="notice">
-        <strong>使用方式：</strong>老師先按「建立即時收分 Session」，再投影 QR Code。學生手機可用任何網路開啟公開網址；分數會即時送回老師這個瀏覽器分頁。
+        <strong>使用方式：</strong>老師先設定班級組數與組別，按「儲存並抽籤」，再按「建立即時收分 Session」投影 QR Code。學生填組別與座號後評分，分數會即時送回老師這個瀏覽器分頁。
         <br />提醒：公開網站版資料存在老師瀏覽器，活動結束請務必匯出 Excel／JSON。若學校網路阻擋 WebRTC，請改用 repo 內的本機 LAN 版。
       </section>
 
       <section class="grid two">
         <div class="card">
-          <h2>① 組別與抽籤</h2>
+          <h2>① 班級組數與抽籤</h2>
           <label>活動名稱</label>
           <input id="titleInput" type="text" />
+
+          <label>組數快速設定</label>
+          <div class="group-count-row">
+            <input id="groupCountInput" type="number" min="2" max="50" step="1" inputmode="numeric" />
+            <button id="applyGroupCountBtn" type="button">套用組數</button>
+            <span id="groupCountHint" class="pill muted">目前 0 組</span>
+          </div>
+          <p class="hint">例如這個班 9 組，就輸入 9 並按「套用組數」。若有特殊組名，也可以直接在下方逐行修改。</p>
+
           <label>組別名單（一行一組，或用逗號分隔）</label>
           <textarea id="groupsInput"></textarea>
           <div class="actions">
@@ -95,9 +104,12 @@
         <div class="card">
           <h2>③ 本輪即時結果</h2>
           <div class="score-grid">
-            <div><span>報告平均</span><strong id="reportAvg">—</strong></div>
+            <div><span>報告總平均</span><strong id="reportAvg">—</strong></div>
+            <div><span>問題與方法</span><strong id="reportInquiryAvg">—</strong></div>
+            <div><span>證據與分析</span><strong id="reportEvidenceAvg">—</strong></div>
+            <div><span>表達與回應</span><strong id="reportCommunicationAvg">—</strong></div>
             <div><span>提問平均</span><strong id="questionAvg">—</strong></div>
-            <div><span>評分進度</span><strong id="scoreCount">0/0</strong></div>
+            <div><span>評分進度</span><strong id="scoreCount">0人 / 0組</strong></div>
           </div>
           <p id="missingGroups" class="hint">未評分組別：—</p>
           <div class="actions">
@@ -137,13 +149,30 @@
       <section class="card">
         <label>你的組別</label>
         <select id="studentGroupSelect"></select>
-        <p id="eligibilityMsg" class="notice mini">請先選擇你的組別。</p>
+        <label>你的座號</label>
+        <input id="studentSeatNo" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：12" />
+        <p id="eligibilityMsg" class="notice mini">請先選擇你的組別並填寫座號。</p>
       </section>
 
       <section class="card">
         <h2>本輪評分</h2>
-        <label>報告組整體表現分數（1–10）</label>
-        <div class="range-row"><input id="studentReportScore" type="range" min="1" max="10" value="8" /><strong id="studentReportScoreText">8</strong></div>
+        <p class="hint">報告組請從三個探究與實作關鍵能力評分；每項 1–10 分。</p>
+
+        <div class="criterion">
+          <label>報告項目一｜探究問題與方法設計 <span>問題意識、變因控制、方法合理性</span></label>
+          <div class="range-row"><input id="studentReport_inquiryDesign" type="range" min="1" max="10" value="8" /><strong id="studentReport_inquiryDesign_Text">8</strong></div>
+        </div>
+
+        <div class="criterion">
+          <label>報告項目二｜資料證據與分析解釋 <span>數據品質、圖表呈現、證據支持結論</span></label>
+          <div class="range-row"><input id="studentReport_evidenceAnalysis" type="range" min="1" max="10" value="8" /><strong id="studentReport_evidenceAnalysis_Text">8</strong></div>
+        </div>
+
+        <div class="criterion">
+          <label>報告項目三｜科學表達與回應能力 <span>結構清楚、時間掌握、回應提問</span></label>
+          <div class="range-row"><input id="studentReport_communication" type="range" min="1" max="10" value="8" /><strong id="studentReport_communication_Text">8</strong></div>
+        </div>
+
         <label>提問組問題品質分數（1–10）</label>
         <div class="range-row"><input id="studentQuestionScore" type="range" min="1" max="10" value="8" /><strong id="studentQuestionScoreText">8</strong></div>
         <label>備註（可不填）</label>

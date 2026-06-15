@@ -1,16 +1,41 @@
 (() => {
   'use strict';
 
-  const LS_KEY = 'inquiryPracticeReportPlatform.v1';
-  const DEFAULT_GROUPS = Array.from({ length: 8 }, (_, i) => `第${i + 1}組`);
+  const LS_KEY = 'inquiryPracticeReportPlatform.v2';
+  const STUDENT_ID_KEY = 'inquiryPracticeReportPlatform.studentIdentity.v1';
+  const DEFAULT_GROUP_COUNT = 9;
   const PHASE_LABEL = { setup: '設定中', report: '報告時間', question: '提問時間', rating: '評分／換場時間', done: '已完成' };
   const DURATION = { report: 300, question: 180, rating: 180 };
+  const REPORT_CRITERIA = [
+    {
+      key: 'inquiryDesign',
+      short: '問題與方法',
+      label: '探究問題與方法設計',
+      description: '問題意識、變因控制、方法合理性',
+      avgId: 'reportInquiryAvg',
+    },
+    {
+      key: 'evidenceAnalysis',
+      short: '證據與分析',
+      label: '資料證據與分析解釋',
+      description: '數據品質、圖表呈現、證據支持結論',
+      avgId: 'reportEvidenceAvg',
+    },
+    {
+      key: 'communication',
+      short: '表達與回應',
+      label: '科學表達與回應能力',
+      description: '結構清楚、時間掌握、回應提問',
+      avgId: 'reportCommunicationAvg',
+    },
+  ];
 
   const $ = (id) => document.getElementById(id);
   const isStudentMode = new URLSearchParams(location.search).has('session');
   const now = () => Date.now();
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const safeText = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const makeDefaultGroups = (count) => Array.from({ length: count }, (_, i) => `第${i + 1}組`);
 
   let state = loadState();
   let teacherPeer = null;
@@ -18,13 +43,25 @@
   let studentPeer = null;
   let studentConn = null;
   let studentState = null;
+  let savedStudentGroup = '';
   let lastDoneKey = '';
 
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   function defaultState() {
-    const [reportOrder, questionOrder] = makeDerangedOrders(DEFAULT_GROUPS);
+    const groups = makeDefaultGroups(DEFAULT_GROUP_COUNT);
+    const [reportOrder, questionOrder] = makeDerangedOrders(groups);
     return {
+      schemaVersion: 2,
       title: '探究與實作期末報告',
-      groups: DEFAULT_GROUPS,
+      groups,
       reportOrder,
       questionOrder,
       currentIndex: 0,
@@ -36,14 +73,34 @@
   }
 
   function loadState() {
+    const base = defaultState();
     try {
       const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return defaultState();
+      if (!raw) return base;
       const parsed = JSON.parse(raw);
-      return { ...defaultState(), ...parsed, timer: parsed.timer || defaultState().timer };
+      return normalizeLoadedState(parsed, base);
     } catch (_) {
-      return defaultState();
+      return base;
     }
+  }
+
+  function normalizeLoadedState(parsed, base = defaultState()) {
+    const groups = Array.isArray(parsed.groups) && parsed.groups.length >= 2 ? parsed.groups.map(safeText).filter(Boolean) : base.groups;
+    let reportOrder = Array.isArray(parsed.reportOrder) ? parsed.reportOrder.map(safeText).filter(Boolean) : [];
+    let questionOrder = Array.isArray(parsed.questionOrder) ? parsed.questionOrder.map(safeText).filter(Boolean) : [];
+    const orderLooksValid = reportOrder.length === groups.length && questionOrder.length === groups.length && groups.every((g) => reportOrder.includes(g) && questionOrder.includes(g));
+    if (!orderLooksValid) [reportOrder, questionOrder] = makeDerangedOrders(groups);
+    return {
+      ...base,
+      ...parsed,
+      schemaVersion: 2,
+      groups,
+      reportOrder,
+      questionOrder,
+      currentIndex: clamp(Number(parsed.currentIndex || 0), 0, Math.max(0, groups.length - 1)),
+      timer: parsed.timer || base.timer,
+      scores: parsed.scores || {},
+    };
   }
 
   function saveState() {
@@ -105,20 +162,64 @@
     return (s.groups || []).filter((g) => g !== report && g !== question);
   }
 
+  function validScore(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 1 && n <= 10;
+  }
+
+  function avg(values) {
+    const nums = values.map(Number).filter(Number.isFinite);
+    return nums.length ? Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100 : null;
+  }
+
+  function scoreText(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function normalizeScoreRecord(entryKey, record = {}) {
+    const keyGroup = safeText(String(entryKey).split('::')[0]);
+    const scorerGroup = safeText(record.scorerGroup) || keyGroup;
+    const seatNo = safeText(record.seatNo);
+    const reportScores = {};
+    for (const criterion of REPORT_CRITERIA) {
+      const raw = record.reportScores?.[criterion.key];
+      if (validScore(raw)) reportScores[criterion.key] = Number(raw);
+      else if (validScore(record.reportScore)) reportScores[criterion.key] = Number(record.reportScore);
+    }
+    return {
+      ...record,
+      scorerGroup,
+      seatNo,
+      reportScores,
+      reportScore: avg(REPORT_CRITERIA.map((c) => reportScores[c.key])),
+      questionScore: validScore(record.questionScore) ? Number(record.questionScore) : null,
+    };
+  }
+
+  function roundRecords(roundIndex, s = state) {
+    return Object.entries(s.scores?.[roundIndex] || {}).map(([entryKey, record]) => normalizeScoreRecord(entryKey, record));
+  }
+
   function roundStats(roundIndex, s = state) {
-    const rows = Object.entries(s.scores?.[roundIndex] || {});
-    const reportScores = rows.map(([, v]) => Number(v.reportScore)).filter(Number.isFinite);
-    const questionScores = rows.map(([, v]) => Number(v.questionScore)).filter(Number.isFinite);
-    const avg = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 100) / 100 : null);
-    const submitted = new Set(rows.map(([g]) => g));
-    const missing = expectedScorers(roundIndex, s).filter((g) => !submitted.has(g));
+    const records = roundRecords(roundIndex, s);
+    const submittedGroups = new Set(records.map((r) => r.scorerGroup).filter(Boolean));
+    const missing = expectedScorers(roundIndex, s).filter((g) => !submittedGroups.has(g));
+    const criteriaAvgs = {};
+    for (const criterion of REPORT_CRITERIA) {
+      criteriaAvgs[criterion.key] = avg(records.map((r) => r.reportScores?.[criterion.key]));
+    }
     return {
       roundNo: roundIndex + 1,
       reportGroup: s.reportOrder?.[roundIndex] || '',
       questionGroup: s.questionOrder?.[roundIndex] || '',
-      reportAvg: avg(reportScores),
-      questionAvg: avg(questionScores),
-      count: rows.length,
+      reportAvg: avg(records.map((r) => r.reportScore)),
+      reportCriteriaAvgs: criteriaAvgs,
+      questionAvg: avg(records.map((r) => r.questionScore)),
+      responseCount: records.length,
+      submittedGroupCount: submittedGroups.size,
       expectedCount: expectedScorers(roundIndex, s).length,
       missingGroups: missing,
     };
@@ -135,6 +236,7 @@
       phaseLabel: PHASE_LABEL[state.phase] || '設定中',
       timer: timerView(state),
       currentRound: currentRound(state),
+      reportCriteria: REPORT_CRITERIA.map(({ key, short, label, description }) => ({ key, short, label, description })),
       updatedAt: state.updatedAt,
     };
   }
@@ -142,10 +244,6 @@
   function mmss(sec) {
     sec = Math.max(0, Math.floor(sec || 0));
     return `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
-  }
-
-  function toast(msg) {
-    console.log(msg);
   }
 
   function bell() {
@@ -170,22 +268,42 @@
     saveState();
     renderTeacher();
     broadcastState();
-    bell(); // unlock audio on teacher click
+    bell();
+  }
+
+  function updateGroupCountHint() {
+    const groups = parseGroups($('groupsInput')?.value || '');
+    const count = groups.length || state.groups.length || 0;
+    if ($('groupCountHint')) $('groupCountHint').textContent = `目前 ${count} 組`;
+    if ($('groupCountInput') && document.activeElement !== $('groupCountInput')) $('groupCountInput').value = count;
   }
 
   function setupTeacher() {
     $('teacherApp').classList.remove('hidden');
     $('titleInput').value = state.title;
     $('groupsInput').value = state.groups.join('\n');
+    $('groupCountInput').value = state.groups.length;
+    updateGroupCountHint();
+
+    $('groupsInput').addEventListener('input', updateGroupCountHint);
+    $('applyGroupCountBtn').onclick = () => {
+      const count = clamp(Math.floor(Number($('groupCountInput').value) || DEFAULT_GROUP_COUNT), 2, 50);
+      $('groupCountInput').value = count;
+      $('groupsInput').value = makeDefaultGroups(count).join('\n');
+      updateGroupCountHint();
+    };
     $('saveShuffleBtn').onclick = () => {
       const groups = parseGroups($('groupsInput').value);
       if (groups.length < 2) return alert('至少需要 2 個組別。');
       const [reportOrder, questionOrder] = makeDerangedOrders(groups);
-      state = { ...state, title: safeText($('titleInput').value) || '探究與實作期末報告', groups, reportOrder, questionOrder, currentIndex: 0, scores: {}, phase: 'setup', timer: { running: false, phase: 'setup', duration: 0, startedAt: null, endsAt: null } };
+      state = { ...state, schemaVersion: 2, title: safeText($('titleInput').value) || '探究與實作期末報告', groups, reportOrder, questionOrder, currentIndex: 0, scores: {}, phase: 'setup', timer: { running: false, phase: 'setup', duration: 0, startedAt: null, endsAt: null } };
       saveState(); renderTeacher(); broadcastState();
     };
     $('reshuffleBtn').onclick = () => {
-      const [reportOrder, questionOrder] = makeDerangedOrders(state.groups);
+      const groups = parseGroups($('groupsInput').value);
+      if (groups.length < 2) return alert('至少需要 2 個組別。');
+      const [reportOrder, questionOrder] = makeDerangedOrders(groups);
+      state.groups = groups;
       state.reportOrder = reportOrder; state.questionOrder = questionOrder; state.currentIndex = 0; state.scores = {}; state.phase = 'setup';
       state.timer = { running: false, phase: 'setup', duration: 0, startedAt: null, endsAt: null };
       saveState(); renderTeacher(); broadcastState();
@@ -245,18 +363,32 @@
     if (msg.type !== 'score') return;
     const p = msg.payload || {};
     const idx = Number(p.roundIndex);
-    const scorer = safeText(p.scorerGroup);
-    const reportScore = Number(p.reportScore);
+    const scorerGroup = safeText(p.scorerGroup);
+    const seatNo = safeText(p.seatNo);
+    const reportScores = {};
+    for (const criterion of REPORT_CRITERIA) reportScores[criterion.key] = Number(p.reportScores?.[criterion.key]);
     const questionScore = Number(p.questionScore);
     const cr = currentRound();
     if (idx < 0 || idx >= cr.total) return conn.send({ type: 'error', message: '輪次錯誤，請重新整理。' });
-    if (!state.groups.includes(scorer)) return conn.send({ type: 'error', message: '請選擇有效組別。' });
-    if ([state.reportOrder[idx], state.questionOrder[idx]].includes(scorer)) return conn.send({ type: 'error', message: '本輪報告組與提問組不需評分。' });
-    if (!(reportScore >= 1 && reportScore <= 10 && questionScore >= 1 && questionScore <= 10)) return conn.send({ type: 'error', message: '分數必須是 1–10。' });
+    if (!state.groups.includes(scorerGroup)) return conn.send({ type: 'error', message: '請選擇有效組別。' });
+    if (!seatNo) return conn.send({ type: 'error', message: '請填寫座號。' });
+    if (seatNo.length > 12) return conn.send({ type: 'error', message: '座號太長，請填 1–12 個字元。' });
+    if ([state.reportOrder[idx], state.questionOrder[idx]].includes(scorerGroup)) return conn.send({ type: 'error', message: '本輪報告組與提問組不需評分。' });
+    if (!REPORT_CRITERIA.every((c) => validScore(reportScores[c.key])) || !validScore(questionScore)) return conn.send({ type: 'error', message: '分數必須都是 1–10。' });
     state.scores[idx] = state.scores[idx] || {};
-    state.scores[idx][scorer] = { reportScore, questionScore, comment: safeText(p.comment), submittedAt: new Date().toISOString(), peer: conn.peer };
+    const recordKey = `${scorerGroup}::${seatNo}`;
+    state.scores[idx][recordKey] = {
+      scorerGroup,
+      seatNo,
+      reportScores,
+      reportScore: avg(REPORT_CRITERIA.map((c) => reportScores[c.key])),
+      questionScore,
+      comment: safeText(p.comment),
+      submittedAt: new Date().toISOString(),
+      peer: conn.peer,
+    };
     saveState();
-    conn.send({ type: 'ack', message: '已送出／更新評分。' });
+    conn.send({ type: 'ack', message: '已送出／更新本輪評分。' });
     renderTeacher();
     broadcastState();
   }
@@ -277,6 +409,7 @@
   function renderTeacher(updateInputs = true) {
     if (updateInputs && document.activeElement !== $('titleInput')) $('titleInput').value = state.title;
     if (updateInputs && document.activeElement !== $('groupsInput')) $('groupsInput').value = state.groups.join('\n');
+    updateGroupCountHint();
     const cr = currentRound(); const tv = timerView();
     $('roundInfo').textContent = cr.total ? `第 ${cr.roundNo} / ${cr.total} 輪` : '尚未抽籤';
     $('phaseLabel').textContent = tv.label;
@@ -290,41 +423,66 @@
       if (key !== lastDoneKey) { lastDoneKey = key; bell(); }
     }
     const cs = cr.total ? roundStats(cr.index) : null;
-    $('reportAvg').textContent = cs?.reportAvg ?? '—';
-    $('questionAvg').textContent = cs?.questionAvg ?? '—';
-    $('scoreCount').textContent = cs ? `${cs.count}/${cs.expectedCount}` : '0/0';
+    $('reportAvg').textContent = scoreText(cs?.reportAvg);
+    $('questionAvg').textContent = scoreText(cs?.questionAvg);
+    for (const criterion of REPORT_CRITERIA) $(criterion.avgId).textContent = scoreText(cs?.reportCriteriaAvgs?.[criterion.key]);
+    $('scoreCount').textContent = cs ? `${cs.responseCount}人 / ${cs.submittedGroupCount}/${cs.expectedCount}組` : '0人 / 0組';
     $('missingGroups').textContent = `未評分組別：${cs?.missingGroups?.join('、') || '—'}`;
     renderOrderTable(); renderStatsTable();
+  }
+
+  function renderRows(tableId, rows) {
+    $(tableId).innerHTML = rows.map((r, i) => `<tr>${r.map((c) => i ? `<td>${escapeHtml(c)}</td>` : `<th>${escapeHtml(c)}</th>`).join('')}</tr>`).join('');
   }
 
   function renderOrderTable() {
     const rows = [['順位', '上台報告', '負責提問', '檢查']];
     const total = Math.min(state.reportOrder.length, state.questionOrder.length);
     for (let i = 0; i < total; i++) rows.push([i + 1, state.reportOrder[i], state.questionOrder[i], state.reportOrder[i] === state.questionOrder[i] ? '衝突' : 'OK']);
-    $('orderTable').innerHTML = rows.map((r, i) => `<tr class="${i && r[3] !== 'OK' ? 'conflict' : ''}">${r.map((c) => i ? `<td>${c}</td>` : `<th>${c}</th>`).join('')}</tr>`).join('');
+    $('orderTable').innerHTML = rows.map((r, i) => `<tr class="${i && r[3] !== 'OK' ? 'conflict' : ''}">${r.map((c) => i ? `<td>${escapeHtml(c)}</td>` : `<th>${escapeHtml(c)}</th>`).join('')}</tr>`).join('');
   }
 
   function renderStatsTable() {
     const total = Math.min(state.reportOrder.length, state.questionOrder.length);
-    const rows = [['順位', '報告組', '提問組', '報告平均', '提問平均', '評分進度', '未評分']];
+    const rows = [['順位', '報告組', '提問組', '報告總平均', '問題與方法', '證據與分析', '表達與回應', '提問平均', '評分進度', '未評分']];
     for (let i = 0; i < total; i++) {
       const s = roundStats(i);
-      rows.push([s.roundNo, s.reportGroup, s.questionGroup, s.reportAvg ?? '—', s.questionAvg ?? '—', `${s.count}/${s.expectedCount}`, s.missingGroups.join('、') || '—']);
+      rows.push([
+        s.roundNo,
+        s.reportGroup,
+        s.questionGroup,
+        scoreText(s.reportAvg),
+        scoreText(s.reportCriteriaAvgs.inquiryDesign),
+        scoreText(s.reportCriteriaAvgs.evidenceAnalysis),
+        scoreText(s.reportCriteriaAvgs.communication),
+        scoreText(s.questionAvg),
+        `${s.responseCount}人 / ${s.submittedGroupCount}/${s.expectedCount}組`,
+        s.missingGroups.join('、') || '—',
+      ]);
     }
-    $('statsTable').innerHTML = rows.map((r, i) => `<tr>${r.map((c) => i ? `<td>${c}</td>` : `<th>${c}</th>`).join('')}</tr>`).join('');
+    renderRows('statsTable', rows);
   }
 
   function exportRows() {
     const total = Math.min(state.reportOrder.length, state.questionOrder.length);
-    const summary = [[state.title], ['匯出時間', new Date().toLocaleString()], [], ['順位', '報告組別', '提問組別', '報告平均分', '提問平均分', '已評分組數', '應評分組數', '未評分組別']];
-    for (let i = 0; i < total; i++) { const s = roundStats(i); summary.push([s.roundNo, s.reportGroup, s.questionGroup, s.reportAvg, s.questionAvg, s.count, s.expectedCount, s.missingGroups.join('、')]); }
-    const groupSummary = [['組別', '報告順位', '報告平均', '提問順位', '提問平均']];
+    const summary = [[state.title], ['匯出時間', new Date().toLocaleString()], [], ['順位', '報告組別', '提問組別', '報告總平均', '探究問題與方法設計', '資料證據與分析解釋', '科學表達與回應能力', '提問平均', '評分人數', '已評分組數', '應評分組數', '未評分組別']];
+    for (let i = 0; i < total; i++) {
+      const s = roundStats(i);
+      summary.push([s.roundNo, s.reportGroup, s.questionGroup, s.reportAvg, s.reportCriteriaAvgs.inquiryDesign, s.reportCriteriaAvgs.evidenceAnalysis, s.reportCriteriaAvgs.communication, s.questionAvg, s.responseCount, s.submittedGroupCount, s.expectedCount, s.missingGroups.join('、')]);
+    }
+    const groupSummary = [['組別', '報告順位', '報告總平均', '探究問題與方法設計', '資料證據與分析解釋', '科學表達與回應能力', '提問順位', '提問平均']];
     for (const g of state.groups) {
       const ri = state.reportOrder.indexOf(g); const qi = state.questionOrder.indexOf(g);
-      groupSummary.push([g, ri >= 0 ? ri + 1 : '', ri >= 0 ? roundStats(ri).reportAvg : '', qi >= 0 ? qi + 1 : '', qi >= 0 ? roundStats(qi).questionAvg : '']);
+      const rs = ri >= 0 ? roundStats(ri) : null;
+      const qs = qi >= 0 ? roundStats(qi) : null;
+      groupSummary.push([g, ri >= 0 ? ri + 1 : '', rs?.reportAvg ?? '', rs?.reportCriteriaAvgs?.inquiryDesign ?? '', rs?.reportCriteriaAvgs?.evidenceAnalysis ?? '', rs?.reportCriteriaAvgs?.communication ?? '', qi >= 0 ? qi + 1 : '', qs?.questionAvg ?? '']);
     }
-    const raw = [['順位', '報告組別', '提問組別', '評分組別', '報告分數', '提問分數', '送出時間', '備註']];
-    for (let i = 0; i < total; i++) for (const [scorer, v] of Object.entries(state.scores[i] || {})) raw.push([i + 1, state.reportOrder[i], state.questionOrder[i], scorer, v.reportScore, v.questionScore, v.submittedAt, v.comment || '']);
+    const raw = [['順位', '報告組別', '提問組別', '評分組別', '評分者座號', '探究問題與方法設計', '資料證據與分析解釋', '科學表達與回應能力', '報告總平均', '提問分數', '送出時間', '備註']];
+    for (let i = 0; i < total; i++) {
+      for (const r of roundRecords(i)) {
+        raw.push([i + 1, state.reportOrder[i], state.questionOrder[i], r.scorerGroup, r.seatNo, r.reportScores.inquiryDesign, r.reportScores.evidenceAnalysis, r.reportScores.communication, r.reportScore, r.questionScore, r.submittedAt, r.comment || '']);
+      }
+    }
     const order = [['順位', '報告組別', '提問組別', '是否衝突']];
     for (let i = 0; i < total; i++) order.push([i + 1, state.reportOrder[i], state.questionOrder[i], state.reportOrder[i] === state.questionOrder[i] ? '衝突' : 'OK']);
     return { summary, groupSummary, raw, order };
@@ -354,7 +512,7 @@
     const file = ev.target.files?.[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      try { state = { ...defaultState(), ...JSON.parse(reader.result) }; saveState(); renderTeacher(); broadcastState(); alert('已匯入備份。'); }
+      try { state = normalizeLoadedState(JSON.parse(reader.result)); saveState(); renderTeacher(); broadcastState(); alert('已匯入備份。'); }
       catch (e) { alert('匯入失敗：' + e.message); }
     };
     reader.readAsText(file, 'utf-8');
@@ -362,9 +520,19 @@
 
   function setupStudent() {
     $('studentApp').classList.remove('hidden');
-    $('studentReportScore').oninput = () => $('studentReportScoreText').textContent = $('studentReportScore').value;
+    try {
+      const saved = JSON.parse(localStorage.getItem(STUDENT_ID_KEY) || '{}');
+      savedStudentGroup = safeText(saved.group);
+      $('studentSeatNo').value = safeText(saved.seatNo);
+    } catch (_) {}
+    for (const criterion of REPORT_CRITERIA) {
+      const input = $(`studentReport_${criterion.key}`);
+      const text = $(`studentReport_${criterion.key}_Text`);
+      input.oninput = () => { text.textContent = input.value; };
+    }
     $('studentQuestionScore').oninput = () => $('studentQuestionScoreText').textContent = $('studentQuestionScore').value;
     $('studentGroupSelect').onchange = renderStudentEligibility;
+    $('studentSeatNo').addEventListener('input', renderStudentEligibility);
     $('submitScoreBtn').onclick = submitStudentScore;
     const session = new URLSearchParams(location.search).get('session');
     if (!session) { $('studentConn').textContent = '缺少 session'; return; }
@@ -394,29 +562,36 @@
     $('studentRoundInfo').textContent = cr.total ? `第 ${cr.roundNo} / ${cr.total} 輪｜${studentState.timer?.label || ''}｜剩餘 ${mmss(studentState.timer?.remaining || 0)}` : '尚未開始';
     $('studentReportGroup').textContent = cr.reportGroup || '—';
     $('studentQuestionGroup').textContent = cr.questionGroup || '—';
-    const old = $('studentGroupSelect').value;
-    $('studentGroupSelect').innerHTML = '<option value="">請選擇你的組別</option>' + (studentState.groups || []).map((g) => `<option value="${g}">${g}</option>`).join('');
+    const old = $('studentGroupSelect').value || savedStudentGroup;
+    $('studentGroupSelect').innerHTML = '<option value="">請選擇你的組別</option>' + (studentState.groups || []).map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
     if (old) $('studentGroupSelect').value = old;
     renderStudentEligibility();
   }
 
   function renderStudentEligibility() {
     const g = $('studentGroupSelect').value;
+    const seatNo = safeText($('studentSeatNo').value);
     const cr = studentState?.currentRound || {};
     const msg = $('eligibilityMsg');
     const btn = $('submitScoreBtn');
-    if (!g) { msg.className = 'notice mini'; msg.textContent = '請先選擇你的組別。'; btn.disabled = true; return; }
+    if (!g || !seatNo) { msg.className = 'notice mini'; msg.textContent = '請先選擇你的組別並填寫座號。'; btn.disabled = true; return; }
     if (g === cr.reportGroup) { msg.className = 'notice mini bad'; msg.textContent = '你們本輪是上台報告組，不需要評分。'; btn.disabled = true; return; }
     if (g === cr.questionGroup) { msg.className = 'notice mini bad'; msg.textContent = '你們本輪是負責提問組，不需要評分。'; btn.disabled = true; return; }
-    msg.className = 'notice mini ok'; msg.textContent = '你們本輪是聽講評分組，請評分報告組與提問組。'; btn.disabled = false;
+    msg.className = 'notice mini ok'; msg.textContent = '你們本輪是聽講評分組，請評分報告組三項能力與提問組問題品質。'; btn.disabled = false;
   }
 
   function submitStudentScore() {
     if (!studentConn?.open) return alert('尚未連線到老師端，請重新整理或重新掃 QR。');
     const scorerGroup = $('studentGroupSelect').value;
+    const seatNo = safeText($('studentSeatNo').value);
     if (!scorerGroup) return alert('請選擇你的組別。');
+    if (!seatNo) return alert('請填寫你的座號。');
+    const reportScores = {};
+    for (const criterion of REPORT_CRITERIA) reportScores[criterion.key] = Number($(`studentReport_${criterion.key}`).value);
     const cr = studentState.currentRound;
-    studentConn.send({ type: 'score', payload: { roundIndex: cr.index, scorerGroup, reportScore: Number($('studentReportScore').value), questionScore: Number($('studentQuestionScore').value), comment: $('studentComment').value } });
+    savedStudentGroup = scorerGroup;
+    localStorage.setItem(STUDENT_ID_KEY, JSON.stringify({ group: scorerGroup, seatNo }));
+    studentConn.send({ type: 'score', payload: { roundIndex: cr.index, scorerGroup, seatNo, reportScores, questionScore: Number($('studentQuestionScore').value), comment: $('studentComment').value } });
     $('submitMsg').textContent = '送出中…'; $('submitMsg').style.color = 'var(--muted)';
   }
 
